@@ -1,5 +1,4 @@
-from datetime import timedelta
-from src.infrastructure.redis_client import get_redis
+from src.infrastructure.redis_client import redis_client
 from src.core.config import settings
 
 class BruteForceProtector:
@@ -8,7 +7,10 @@ class BruteForceProtector:
         self.block_time = settings.LOGIN_BLOCK_TIME_MINUTES * 60
 
     async def _get_redis(self):
-        return await anext(get_redis())
+        # Используем глобальный клиент Redis
+        if not redis_client.client:
+            await redis_client.initialize()
+        return redis_client.client
 
     async def is_blocked(self, identifier: str) -> bool:
         redis = await self._get_redis()

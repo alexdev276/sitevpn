@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Тарифы - VPN Service</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="bg-gray-50">
+    <!-- Навигация -->
+    <nav class="bg-white shadow-sm">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <a href="index.html" class="text-xl font-bold text-indigo-600">VPN Service</a>
+                    <div class="hidden md:ml-6 md:flex md:space-x-8">
+                        <a href="tariffs.html" class="text-indigo-600 border-b-2 border-indigo-600 px-3 py-2 rounded-md text-sm font-medium">Тарифы</a>
+                        <a href="dashboard.html" class="text-gray-700 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium">Личный кабинет</a>
+                    </div>
+                </div>
+                <div class="flex items-center space-x-4" id="authButtons">
+                    <a href="login.html" class="text-gray-700 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium">Вход</a>
+                    <a href="register.html" class="bg-indigo-600 text-white hover:bg-indigo-700 px-4 py-2 rounded-md text-sm font-medium">Регистрация</a>
+                </div>
+                <div class="hidden items-center space-x-4" id="userMenu">
+                    <span class="text-gray-700 text-sm" id="userEmail"></span>
+                    <button id="logoutBtn" class="text-red-600 hover:text-red-800 text-sm font-medium">Выйти</button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="max-w-7xl mx-auto py-12 px-4 sm:px-6 lg:px-8">
+        <h1 class="text-3xl font-bold text-gray-900 mb-8 text-center">Выберите тариф</h1>
+        <div id="tariffsContainer" class="grid grid-cols-1 gap-8 md:grid-cols-3">
+            <!-- Загружается через JS -->
+            <div class="text-center col-span-3">Загрузка тарифов...</div>
+        </div>
+    </div>
+
+    <!-- Модальное окно для оплаты Stripe -->
+    <div id="paymentModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full hidden">
+        <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+            <div class="mt-3 text-center">
+                <h3 class="text-lg leading-6 font-medium text-gray-900">Оплата тарифа</h3>
+                <div class="mt-2 px-7 py-3">
+                    <div id="paymentElement"></div>
+                    <button id="submitPayment" class="mt-4 w-full bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700">Оплатить</button>
+                </div>
+                <button id="closeModal" class="mt-2 text-gray-500 hover:text-gray-700">Закрыть</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://js.stripe.com/v3/"></script>
+    <script src="app.js"></script>
+    <script>
+        const API_URL = 'http://localhost:8000/api/v1';
+        let accessToken = localStorage.getItem('accessToken');
+        let stripe, elements, paymentIntentId;
+
+        // Инициализация Stripe
+        const stripePublicKey = 'pk_test_...'; // Замените на ваш публичный ключ Stripe
+        stripe = Stripe(stripePublicKey);
+
+        // Проверка авторизации для меню
+        function updateAuthUI() {
+            const token = localStorage.getItem('accessToken');
+            const userEmail = localStorage.getItem('userEmail');
+            if (token && userEmail) {
+                document.getElementById('authButtons').classList.add('hidden');
+                document.getElementById('userMenu').classList.remove('hidden');
+                document.getElementById('userEmail').textContent = userEmail;
+            } else {
+                document.getElementById('authButtons').classList.remove('hidden');
+                document.getElementById('userMenu').classList.add('hidden');
+            }
+        }
+        updateAuthUI();
+
+        // Выход
+        document.getElementById('logoutBtn')?.addEventListener('click', async () => {
+            try {
+                await fetch(`${API_URL}/auth/logout`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${accessToken}` },
+                    credentials: 'include'
+                });
+            } catch (e) {}
+            localStorage.removeItem('accessToken');
+            localStorage.removeItem('userEmail');
+            window.location.href = 'login.html';
+        });
+
+        // Загрузка тарифов
+        async function loadTariffs() {
+            try {
+                const resp = await fetch(`${API_URL}/subscriptions/tariffs?active_only=true`);
+                const tariffs = await resp.json();
+                const container = document.getElementById('tariffsContainer');
+                if (tariffs.length === 0) {
+                    container.innerHTML = '<p class="text-center col-span-3">Нет доступных тарифов</p>';
+                    return;
+                }
+                container.innerHTML = tariffs.map(t => `
+                    <div class="bg-white rounded-lg shadow-lg overflow-hidden">
+                        <div class="px-6 py-8">
+                            <h3 class="text-2xl font-bold text-gray-900 text-center">${t.name}</h3>
+                            <p class="mt-4 text-gray-500 text-center">${t.description || ''}</p>
+                            <p class="mt-8 text-center">
+                                <span class="text-4xl font-extrabold text-gray-900">$${t.price}</span>
+                                <span class="text-gray-500">/ ${t.duration_days} дн.</span>
+                            </p>
+                            <p class="mt-2 text-center text-gray-600">Трафик: ${t.traffic_limit_gb} GB</p>
+                            <div class="mt-8">
+                                <button data-tariff-id="${t.id}" class="buyBtn w-full bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700">
+                                    Выбрать
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+
+                // Обработчики кнопок
+                document.querySelectorAll('.buyBtn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        const tariffId = e.target.dataset.tariffId;
+                        if (!accessToken) {
+                            window.location.href = 'login.html';
+                            return;
+                        }
+                        initiatePayment(tariffId);
+                    });
+                });
+            } catch (error) {
+                console.error('Ошибка загрузки тарифов:', error);
+            }
+        }
+
+        async function initiatePayment(tariffId) {
+            try {
+                const resp = await fetch(`${API_URL}/payments/create-intent`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${accessToken}`
+                    },
+                    body: JSON.stringify({ tariff_id: parseInt(tariffId) })
+                });
+                if (!resp.ok) throw new Error('Ошибка создания платежа');
+                const data = await resp.json();
+                paymentIntentId = data.payment_intent_id;
+
+                // Показать модальное окно
+                document.getElementById('paymentModal').classList.remove('hidden');
+                
+                elements = stripe.elements({ clientSecret: data.client_secret });
+                const paymentElement = elements.create('payment');
+                paymentElement.mount('#paymentElement');
+
+                document.getElementById('submitPayment').onclick = async () => {
+                    const { error } = await stripe.confirmPayment({
+                        elements,
+                        confirmParams: {
+                            return_url: window.location.origin + '/dashboard.html',
+                        },
+                        redirect: 'if_required'
+                    });
+                    if (error) {
+                        alert(error.message);
+                    } else {
+                        alert('Оплата прошла успешно!');
+                        document.getElementById('paymentModal').classList.add('hidden');
+                        window.location.href = 'dashboard.html';
+                    }
+                };
+            } catch (error) {
+                alert(error.message);
+            }
+        }
+
+        document.getElementById('closeModal').addEventListener('click', () => {
+            document.getElementById('paymentModal').classList.add('hidden');
+        });
+
+        loadTariffs();
+    </script>
+</body>
+</html>

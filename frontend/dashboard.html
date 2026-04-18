@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Личный кабинет - VPN Service</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="bg-gray-50">
+    <!-- Навигация -->
+    <nav class="bg-white shadow-sm">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <a href="index.html" class="text-xl font-bold text-indigo-600">VPN Service</a>
+                    <div class="hidden md:ml-6 md:flex md:space-x-8">
+                        <a href="tariffs.html" class="text-gray-700 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium">Тарифы</a>
+                        <a href="dashboard.html" class="text-indigo-600 border-b-2 border-indigo-600 px-3 py-2 rounded-md text-sm font-medium">Личный кабинет</a>
+                    </div>
+                </div>
+                <div class="flex items-center space-x-4" id="userMenu">
+                    <span class="text-gray-700 text-sm" id="userEmail"></span>
+                    <button id="logoutBtn" class="text-red-600 hover:text-red-800 text-sm font-medium">Выйти</button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="max-w-7xl mx-auto py-10 px-4 sm:px-6 lg:px-8">
+        <h1 class="text-3xl font-bold text-gray-900 mb-8">Личный кабинет</h1>
+        
+        <!-- Информация о подписке -->
+        <div class="bg-white shadow rounded-lg p-6 mb-8">
+            <h2 class="text-xl font-semibold text-gray-900 mb-4">Текущая подписка</h2>
+            <div id="subscriptionInfo" class="text-gray-600">Загрузка...</div>
+        </div>
+
+        <!-- Статистика VPN -->
+        <div class="bg-white shadow rounded-lg p-6 mb-8">
+            <h2 class="text-xl font-semibold text-gray-900 mb-4">Использование трафика</h2>
+            <div id="vpnStats" class="text-gray-600">Загрузка...</div>
+        </div>
+
+        <!-- Ссылка на конфиг -->
+        <div class="bg-white shadow rounded-lg p-6 mb-8">
+            <h2 class="text-xl font-semibold text-gray-900 mb-4">Подключение</h2>
+            <div id="configLink" class="text-gray-600">
+                <button id="getConfigBtn" class="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700">Получить конфиг</button>
+                <span id="configUrl" class="ml-4"></span>
+            </div>
+        </div>
+
+        <!-- История платежей -->
+        <div class="bg-white shadow rounded-lg p-6">
+            <h2 class="text-xl font-semibold text-gray-900 mb-4">История платежей</h2>
+            <div id="paymentsList" class="text-gray-600">Загрузка...</div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+    <script>
+        const API_URL = 'http://localhost:8000/api/v1';
+        let accessToken = localStorage.getItem('accessToken');
+
+        // Проверка авторизации
+        if (!accessToken) {
+            window.location.href = 'login.html';
+        }
+
+        // Отображение email
+        document.getElementById('userEmail').textContent = localStorage.getItem('userEmail') || '';
+
+        // Выход
+        document.getElementById('logoutBtn').addEventListener('click', async () => {
+            try {
+                await fetch(`${API_URL}/auth/logout`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${accessToken}` },
+                    credentials: 'include'
+                });
+            } catch (e) {}
+            localStorage.removeItem('accessToken');
+            localStorage.removeItem('userEmail');
+            window.location.href = 'login.html';
+        });
+
+        // Загрузка данных
+        async function loadDashboard() {
+            const headers = { 'Authorization': `Bearer ${accessToken}` };
+
+            try {
+                // Получить активную подписку
+                const subResp = await fetch(`${API_URL}/subscriptions/active`, { headers });
+                if (subResp.ok) {
+                    const sub = await subResp.json();
+                    const tariff = sub.tariff;
+                    document.getElementById('subscriptionInfo').innerHTML = `
+                        <p><strong>Тариф:</strong> ${tariff.name}</p>
+                        <p><strong>Статус:</strong> ${sub.status}</p>
+                        <p><strong>Действует до:</strong> ${new Date(sub.end_date).toLocaleString()}</p>
+                        <p><strong>Автопродление:</strong> ${sub.auto_renew ? 'Включено' : 'Отключено'}</p>
+                        ${sub.status === 'active' ? `<button onclick="cancelSubscription(${sub.id})" class="mt-2 text-red-600 hover:text-red-800">Отменить подписку</button>` : ''}
+                    `;
+                } else if (subResp.status === 404) {
+                    document.getElementById('subscriptionInfo').innerHTML = '<p>У вас нет активной подписки. <a href="tariffs.html" class="text-indigo-600">Выбрать тариф</a></p>';
+                } else {
+                    throw new Error('Ошибка загрузки подписки');
+                }
+
+                // Получить статистику VPN
+                const statsResp = await fetch(`${API_URL}/users/me/vpn-usage`, { headers });
+                if (statsResp.ok) {
+                    const stats = await statsResp.json();
+                    const usedGB = (stats.used_traffic_bytes / 1024 / 1024 / 1024).toFixed(2);
+                    const totalGB = (stats.total_traffic_bytes / 1024 / 1024 / 1024).toFixed(2);
+                    document.getElementById('vpnStats').innerHTML = `
+                        <p>Использовано: ${usedGB} GB из ${totalGB} GB</p>
+                        <p>Статус: ${stats.is_active ? 'Активен' : 'Неактивен'}</p>
+                        <p>Истекает: ${stats.expire_at ? new Date(stats.expire_at).toLocaleString() : 'Не задано'}</p>
+                    `;
+                } else {
+                    document.getElementById('vpnStats').textContent = 'VPN аккаунт ещё не создан.';
+                }
+
+                // Получить историю платежей
+                const paymentsResp = await fetch(`${API_URL}/payments/?skip=0&limit=10`, { headers });
+                if (paymentsResp.ok) {
+                    const payments = await paymentsResp.json();
+                    if (payments.length === 0) {
+                        document.getElementById('paymentsList').textContent = 'Нет платежей';
+                    } else {
+                        let html = '<ul class="divide-y divide-gray-200">';
+                        payments.forEach(p => {
+                            html += `<li class="py-2">
+                                <span class="font-medium">${new Date(p.created_at).toLocaleDateString()}</span> - 
+                                ${p.amount} ${p.currency} - 
+                                <span class="${p.status === 'succeeded' ? 'text-green-600' : 'text-yellow-600'}">${p.status}</span>
+                            </li>`;
+                        });
+                        html += '</ul>';
+                        document.getElementById('paymentsList').innerHTML = html;
+                    }
+                }
+
+                // Кнопка получения конфига
+                document.getElementById('getConfigBtn').addEventListener('click', async () => {
+                    const configResp = await fetch(`${API_URL}/users/me/vpn-config`, { headers });
+                    if (configResp.ok) {
+                        const data = await configResp.json();
+                        document.getElementById('configUrl').innerHTML = `<a href="${data.config_url}" target="_blank" class="text-indigo-600">Скачать конфиг</a>`;
+                    } else {
+                        alert('Не удалось получить конфигурацию');
+                    }
+                });
+
+            } catch (error) {
+                console.error(error);
+                // Если ошибка авторизации, разлогинить
+                if (error.message.includes('401')) {
+                    localStorage.clear();
+                    window.location.href = 'login.html';
+                }
+            }
+        }
+
+        window.cancelSubscription = async (subId) => {
+            if (!confirm('Вы уверены, что хотите отменить подписку?')) return;
+            const headers = { 'Authorization': `Bearer ${accessToken}` };
+            try {
+                const resp = await fetch(`${API_URL}/subscriptions/${subId}/cancel`, {
+                    method: 'POST',
+                    headers
+                });
+                if (resp.ok) {
+                    alert('Подписка отменена');
+                    loadDashboard();
+                } else {
+                    const err = await resp.json();
+                    alert(err.detail || 'Ошибка отмены');
+                }
+            } catch (e) {
+                alert('Ошибка сети');
+            }
+        };
+
+        loadDashboard();
+    </script>
+</body>
+</html>

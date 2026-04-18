@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VPN Service - Главная</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="bg-gray-50">
+    <!-- Навигация -->
+    <nav class="bg-white shadow-sm">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <a href="index.html" class="text-xl font-bold text-indigo-600">VPN Service</a>
+                    <div class="hidden md:ml-6 md:flex md:space-x-8">
+                        <a href="tariffs.html" class="text-gray-700 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium">Тарифы</a>
+                        <a href="dashboard.html" class="text-gray-700 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium" id="dashboardLink">Личный кабинет</a>
+                    </div>
+                </div>
+                <div class="flex items-center space-x-4" id="authButtons">
+                    <a href="login.html" class="text-gray-700 hover:text-indigo-600 px-3 py-2 rounded-md text-sm font-medium">Вход</a>
+                    <a href="register.html" class="bg-indigo-600 text-white hover:bg-indigo-700 px-4 py-2 rounded-md text-sm font-medium">Регистрация</a>
+                </div>
+                <div class="hidden items-center space-x-4" id="userMenu">
+                    <span class="text-gray-700 text-sm" id="userEmail"></span>
+                    <button id="logoutBtn" class="text-red-600 hover:text-red-800 text-sm font-medium">Выйти</button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Hero секция -->
+    <div class="bg-white">
+        <div class="max-w-7xl mx-auto py-16 px-4 sm:py-24 sm:px-6 lg:px-8">
+            <div class="text-center">
+                <h1 class="text-4xl font-extrabold text-gray-900 sm:text-5xl sm:tracking-tight lg:text-6xl">
+                    Быстрый и безопасный VPN
+                </h1>
+                <p class="mt-5 max-w-xl mx-auto text-xl text-gray-500">
+                    Защитите свои данные и получите доступ к любому контенту с нашим VPN-сервисом.
+                </p>
+                <div class="mt-8">
+                    <a href="register.html" class="inline-flex items-center justify-center px-5 py-3 border border-transparent text-base font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700">
+                        Попробовать бесплатно
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Особенности -->
+    <div class="py-12 bg-gray-50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="grid grid-cols-1 gap-8 md:grid-cols-3">
+                <div class="bg-white overflow-hidden shadow rounded-lg">
+                    <div class="px-4 py-5 sm:p-6">
+                        <h3 class="text-lg font-medium text-gray-900">Высокая скорость</h3>
+                        <p class="mt-2 text-gray-500">Серверы по всему миру обеспечивают минимальную задержку.</p>
+                    </div>
+                </div>
+                <div class="bg-white overflow-hidden shadow rounded-lg">
+                    <div class="px-4 py-5 sm:p-6">
+                        <h3 class="text-lg font-medium text-gray-900">Безопасность</h3>
+                        <p class="mt-2 text-gray-500">Шифрование военного уровня для ваших данных.</p>
+                    </div>
+                </div>
+                <div class="bg-white overflow-hidden shadow rounded-lg">
+                    <div class="px-4 py-5 sm:p-6">
+                        <h3 class="text-lg font-medium text-gray-900">Безлимитный трафик</h3>
+                        <p class="mt-2 text-gray-500">Никаких ограничений по объёму данных.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+    <script>
+        // Проверка авторизации для отображения меню
+        document.addEventListener('DOMContentLoaded', () => {
+            const token = localStorage.getItem('accessToken');
+            const userEmail = localStorage.getItem('userEmail');
+            if (token && userEmail) {
+                document.getElementById('authButtons').classList.add('hidden');
+                document.getElementById('userMenu').classList.remove('hidden');
+                document.getElementById('userEmail').textContent = userEmail;
+                document.getElementById('dashboardLink').href = 'dashboard.html';
+            }
+        });
+    </script>
+</body>
+</html>

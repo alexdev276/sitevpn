@@ -6,9 +6,8 @@ from httpx import AsyncClient, ASGITransport
 
 from src.main import app
 from src.db.base import Base
-from src.core.config import settings
-from src.infrastructure.redis_client import redis_client
 from src.infrastructure.repositories.user_repository import UserRepository
+from src.infrastructure.repositories.subscription_repository import TariffRepository
 from src.core.security import get_password_hash
 from src.db.models import User, Tariff
 from src.db.session import get_db
@@ -18,6 +17,7 @@ TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 @pytest.fixture(scope="session")
 def event_loop():
+    """Переопределяем event_loop для сессии."""
     loop = asyncio.new_event_loop()
     yield loop
     loop.close()
@@ -38,7 +38,6 @@ async def db_session(engine) -> AsyncGenerator[AsyncSession, None]:
 
 @pytest.fixture(scope="function")
 async def client(db_session) -> AsyncGenerator[AsyncClient, None]:
-    # Override get_db dependency
     async def override_get_db():
         yield db_session
     app.dependency_overrides[get_db] = override_get_db
@@ -50,7 +49,7 @@ async def client(db_session) -> AsyncGenerator[AsyncClient, None]:
     app.dependency_overrides.clear()
 
 @pytest.fixture
-async def test_user(db_session) -> User:
+async def test_user(db_session: AsyncSession) -> User:
     repo = UserRepository(db_session)
     user = await repo.create(
         email="test@example.com",
@@ -62,7 +61,7 @@ async def test_user(db_session) -> User:
     return user
 
 @pytest.fixture
-async def test_admin(db_session) -> User:
+async def test_admin(db_session: AsyncSession) -> User:
     repo = UserRepository(db_session)
     user = await repo.create(
         email="admin@example.com",
@@ -75,8 +74,7 @@ async def test_admin(db_session) -> User:
     return user
 
 @pytest.fixture
-async def test_tariff(db_session) -> Tariff:
-    from src.infrastructure.repositories.subscription_repository import TariffRepository
+async def test_tariff(db_session: AsyncSession) -> Tariff:
     repo = TariffRepository(db_session)
     tariff = await repo.create(
         name="Monthly",
