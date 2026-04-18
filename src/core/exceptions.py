@@ -1,64 +1,88 @@
-from collections.abc import Awaitable, Callable
-
-import structlog
-from fastapi import Request
+from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
-from slowapi.errors import RateLimitExceeded
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+import structlog
 
-
-logger = structlog.get_logger(__name__)
-
+logger = structlog.get_logger()
 
 class AppException(Exception):
-    def __init__(self, message: str, status_code: int = 400, code: str = "app_error") -> None:
-        super().__init__(message)
-        self.message = message
+    def __init__(self, status_code: int, detail: str, error_code: str = None):
         self.status_code = status_code
-        self.code = code
+        self.detail = detail
+        self.error_code = error_code
 
+class NotFoundError(AppException):
+    def __init__(self, detail: str = "Resource not found"):
+        super().__init__(status.HTTP_404_NOT_FOUND, detail, "NOT_FOUND")
 
-class UnauthorizedException(AppException):
-    def __init__(self, message: str = "Unauthorized") -> None:
-        super().__init__(message=message, status_code=401, code="unauthorized")
+class AuthenticationError(AppException):
+    def __init__(self, detail: str = "Authentication failed"):
+        super().__init__(status.HTTP_401_UNAUTHORIZED, detail, "AUTH_ERROR")
 
+class PermissionDeniedError(AppException):
+    def __init__(self, detail: str = "Permission denied"):
+        super().__init__(status.HTTP_403_FORBIDDEN, detail, "PERMISSION_DENIED")
 
-class ForbiddenException(AppException):
-    def __init__(self, message: str = "Forbidden") -> None:
-        super().__init__(message=message, status_code=403, code="forbidden")
+class ValidationError(AppException):
+    def __init__(self, detail: str = "Validation error"):
+        super().__init__(status.HTTP_400_BAD_REQUEST, detail, "VALIDATION_ERROR")
 
+class PaymentError(AppException):
+    def __init__(self, detail: str = "Payment processing error"):
+        super().__init__(status.HTTP_402_PAYMENT_REQUIRED, detail, "PAYMENT_ERROR")
 
-class NotFoundException(AppException):
-    def __init__(self, message: str = "Not found") -> None:
-        super().__init__(message=message, status_code=404, code="not_found")
+class RemnawaveError(AppException):
+    def __init__(self, detail: str = "Remnawave API error"):
+        super().__init__(status.HTTP_502_BAD_GATEWAY, detail, "REMNAWAVE_ERROR")
 
-
-class ConflictException(AppException):
-    def __init__(self, message: str = "Conflict") -> None:
-        super().__init__(message=message, status_code=409, code="conflict")
-
-
-async def api_exception_handler(_: Request, exc: Exception) -> JSONResponse:
-    if isinstance(exc, AppException):
+def setup_exception_handlers(app: FastAPI):
+    @app.exception_handler(AppException)
+    async def app_exception_handler(request: Request, exc: AppException):
+        logger.error(
+            "App exception",
+            error_code=exc.error_code,
+            status_code=exc.status_code,
+            detail=exc.detail,
+            path=request.url.path,
+        )
         return JSONResponse(
             status_code=exc.status_code,
-            content={"error": {"code": exc.code, "message": exc.message}},
+            content={"detail": exc.detail, "error_code": exc.error_code},
         )
 
-    logger.exception("unhandled_exception", error=str(exc))
-    return JSONResponse(
-        status_code=500,
-        content={"error": {"code": "internal_error", "message": "Internal server error"}},
-    )
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+        logger.error(
+            "HTTP exception",
+            status_code=exc.status_code,
+            detail=exc.detail,
+            path=request.url.path,
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+        )
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        logger.error(
+            "Validation error",
+            errors=exc.errors(),
+            path=request.url.path,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"detail": exc.errors()},
+        )
 
-async def rate_limit_handler(_: Request, exc: RateLimitExceeded) -> JSONResponse:
-    return JSONResponse(
-        status_code=429,
-        content={
-            "error": {
-                "code": "rate_limited",
-                "message": f"Rate limit exceeded: {exc.detail}",
-            }
-        },
-    )
-
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        logger.exception(
+            "Unhandled exception",
+            path=request.url.path,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"detail": "Internal server error"},
+        )

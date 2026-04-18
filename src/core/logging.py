@@ -1,31 +1,39 @@
 import logging
-from pathlib import Path
-
 import structlog
+from structlog.processors import JSONRenderer, TimeStamper, add_log_level
+from structlog.stdlib import ProcessorFormatter
 
-from src.core.config import Settings
-
-
-def configure_logging(settings: Settings) -> None:
-    processors = [
-        structlog.contextvars.merge_contextvars,
-        structlog.processors.TimeStamper(fmt="iso", utc=True),
-        structlog.stdlib.add_log_level,
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-        structlog.processors.JSONRenderer(),
-    ]
-    logging.basicConfig(level=getattr(logging, settings.app_log_level.upper(), logging.INFO))
-    if settings.app_log_file:
-        Path(settings.app_log_file).parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(settings.app_log_file)
-        file_handler.setFormatter(logging.Formatter("%(message)s"))
-        logging.getLogger().addHandler(file_handler)
+def setup_logging():
+    timestamper = TimeStamper(fmt="iso")
 
     structlog.configure(
-        processors=processors,
+        processors=[
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            timestamper,
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.UnicodeDecoder(),
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.stdlib.BoundLogger,
         cache_logger_on_first_use=True,
     )
 
+    formatter = ProcessorFormatter(
+        processor=JSONRenderer(),
+    )
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    root_logger.setLevel(logging.INFO)
+
+    # Silence noisy loggers
+    logging.getLogger("uvicorn.access").handlers = []
+    logging.getLogger("uvicorn.access").propagate = True

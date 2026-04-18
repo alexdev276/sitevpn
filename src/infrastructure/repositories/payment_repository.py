@@ -1,38 +1,17 @@
-from __future__ import annotations
-
-from uuid import UUID
-
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from src.db.models import Payment
+from src.infrastructure.repositories.base import BaseRepository
+from typing import List, Optional
 
+class PaymentRepository(BaseRepository[Payment]):
+    def __init__(self, session: AsyncSession):
+        super().__init__(Payment, session)
 
-class PaymentRepository:
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+    async def get_by_stripe_payment_intent_id(self, payment_intent_id: str) -> Optional[Payment]:
+        return await self.get_by(stripe_payment_intent_id=payment_intent_id)
 
-    async def get_by_id(self, payment_id: UUID) -> Payment | None:
-        return await self.session.get(Payment, payment_id)
+    async def list_for_user(self, user_id: int, skip: int = 0, limit: int = 20) -> List[Payment]:
+        return await self.list(skip=skip, limit=limit, user_id=user_id)
 
-    async def get_by_provider_payment_id(self, provider_payment_id: str) -> Payment | None:
-        result = await self.session.execute(
-            select(Payment).where(Payment.provider_payment_id == provider_payment_id)
-        )
-        return result.scalar_one_or_none()
-
-    async def list_for_user(self, user_id: UUID) -> list[Payment]:
-        result = await self.session.execute(
-            select(Payment).where(Payment.user_id == user_id).order_by(Payment.created_at.desc())
-        )
-        return list(result.scalars().all())
-
-    async def list_all(self) -> list[Payment]:
-        result = await self.session.execute(select(Payment).order_by(Payment.created_at.desc()))
-        return list(result.scalars().all())
-
-    async def create(self, **payload) -> Payment:
-        payment = Payment(**payload)
-        self.session.add(payment)
-        await self.session.flush()
-        return payment
+    async def mark_as_succeeded(self, payment_id: int, paid_at) -> None:
+        await self.update(payment_id, status="succeeded", paid_at=paid_at)

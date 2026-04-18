@@ -1,26 +1,23 @@
 from celery import Celery
-from celery.schedules import crontab
+from src.core.config import settings
 
-from src.core.config import get_settings
+celery_app = Celery(
+    "vpn_tasks",
+    broker=settings.CELERY_BROKER_URL,
+    backend=settings.CELERY_RESULT_BACKEND,
+    include=["src.tasks.subscription_tasks", "src.tasks.email_tasks"],
+)
 
-
-settings = get_settings()
-celery_app = Celery("vpn_service", broker=settings.redis_url, backend=settings.redis_url)
 celery_app.conf.update(
-    timezone="UTC",
-    enable_utc=True,
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
+    timezone="UTC",
+    enable_utc=True,
     beat_schedule={
-        "renew-expired-subscriptions": {
-            "task": "src.tasks.jobs.renew_expired_subscriptions",
-            "schedule": crontab(minute="*/30"),
-        },
-        "sync-remnawave-usage": {
-            "task": "src.tasks.jobs.sync_remnawave_usage",
-            "schedule": crontab(minute="*/15"),
+        "renew-subscriptions-daily": {
+            "task": "src.tasks.subscription_tasks.renew_expiring_subscriptions",
+            "schedule": 86400.0,  # daily
         },
     },
 )
-

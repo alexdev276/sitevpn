@@ -1,80 +1,94 @@
-from __future__ import annotations
-
-from uuid import UUID
-
+import structlog
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.config import Settings
-from src.core.exceptions import NotFoundException
-from src.db.models import Subscription
-from src.infrastructure.clients.remnawave_client import RemnawaveClient
-from src.infrastructure.repositories.tariff_repository import TariffRepository
-from src.infrastructure.repositories.user_repository import UserRepository
-from src.infrastructure.repositories.vpn_repository import VpnRepository
+from src.infrastructure.remnawave_client import RemnawaveClient
+from src.infrastructure.repositories.vpn_repository import VpnUserRepository
+from src.infrastructure.repositories.subscription_repository import SubscriptionRepository
+from src.domain.vpn import VpnUserResponse
+from src.db.models import User, Subscription, VpnUser
+from src.core.exceptions import NotFoundError, ValidationError
 
+logger = structlog.get_logger()
 
 class VpnService:
-    def __init__(self, session: AsyncSession, settings: Settings) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        remnawave_client: RemnawaveClient,
+    ):
         self.session = session
-        self.settings = settings
-        self._client: RemnawaveClient | None = None
-        self.users = UserRepository(session)
-        self.vpn_users = VpnRepository(session)
-        self.tariffs = TariffRepository(session)
+        self.remnawave = remnawave_client
+        self.vpn_repo = VpnUserRepository(session)
+        self.sub_repo = SubscriptionRepository(session)
 
-    @property
-    def client(self) -> RemnawaveClient:
-        if self._client is None:
-            self._client = RemnawaveClient(self.settings)
-        return self._client
+    async def provision_vpn_user(self, user: User, subscription: Subscription) -> VpnUser:
+        """Create or update VPN user based on subscription"""
+        # Check if user already has VPN account
+        vpn_user = await self.vpn_repo.get_by_user_id(user.id)
 
-    async def ensure_vpn_user(self, user_id: UUID, subscription: Subscription) -> None:
-        user = await self.users.get_by_id(user_id)
-        tariff = await self.tariffs.get_by_id(subscription.tariff_id)
-        if not user:
-            raise NotFoundException("User not found")
-        if not tariff:
-            raise NotFoundException("Tariff not found")
-        vpn_user = await self.vpn_users.get_by_user_id(user_id)
+        # Prepare params
+        expire_at = subscription.end_date
+        traffic_limit_bytes = subscription.tariff.traffic_limit_gb * 1024 * 1024 * 1024
+
         if vpn_user:
-            updated = await self.client.extend_user(
-                vpn_user.remnawave_user_id,
-                subscription.ends_at,
-                tariff.traffic_limit_bytes,
+            # Update existing
+            await self.remnawave.update_user(
+                uuid=vpn_user.remnawave_uuid,
+                expire_at=expire_at,
+                traffic_limit_bytes=traffic_limit_bytes,
+                status="ACTIVE",
             )
-            vpn_user.expires_at = subscription.ends_at
-            vpn_user.traffic_limit_bytes = tariff.traffic_limit_bytes
-            vpn_user.configs = updated.get("configs", vpn_user.configs)
+            vpn_user.is_blocked = False
             await self.session.commit()
-            return
+            logger.info("VPN user updated", user_id=user.id, uuid=vpn_user.remnawave_uuid)
+        else:
+            # Create new
+            username = f"user_{user.id}"
+            remnawave_user = await self.remnawave.create_user(
+                username=username,
+                email=user.email,
+                expire_at=expire_at,
+                traffic_limit_bytes=traffic_limit_bytes,
+            )
+            vpn_user = await self.vpn_repo.create_for_user(
+                user_id=user.id,
+                remnawave_uuid=remnawave_user["uuid"],
+            )
+            await self.session.commit()
+            logger.info("VPN user created", user_id=user.id, uuid=remnawave_user["uuid"])
 
-        created = await self.client.create_user(
-            username=user.email,
-            expire_at=subscription.ends_at,
-            traffic_limit_bytes=tariff.traffic_limit_bytes,
-        )
-        await self.vpn_users.create(
-            user_id=user.id,
-            remnawave_user_id=created.get("id", created.get("userId", user.email)),
-            username=user.email,
-            expires_at=subscription.ends_at,
-            traffic_limit_bytes=tariff.traffic_limit_bytes,
-            configs=created.get("configs", {}),
-        )
-        await self.session.commit()
+        return vpn_user
 
-    async def block_user(self, user_id: UUID) -> None:
-        vpn_user = await self.vpn_users.get_by_user_id(user_id)
+    async def deactivate_vpn_user(self, user_id: int):
+        vpn_user = await self.vpn_repo.get_by_user_id(user_id)
+        if vpn_user:
+            await self.remnawave.block_user(vpn_user.remnawave_uuid)
+            vpn_user.is_blocked = True
+            await self.session.commit()
+            logger.info("VPN user deactivated", user_id=user_id)
+
+    async def reactivate_vpn_user(self, user_id: int):
+        vpn_user = await self.vpn_repo.get_by_user_id(user_id)
+        if vpn_user:
+            await self.remnawave.unblock_user(vpn_user.remnawave_uuid)
+            vpn_user.is_blocked = False
+            await self.session.commit()
+            logger.info("VPN user reactivated", user_id=user_id)
+
+    async def get_vpn_usage(self, user_id: int) -> dict:
+        vpn_user = await self.vpn_repo.get_by_user_id(user_id)
         if not vpn_user:
-            raise NotFoundException("VPN user not found")
-        await self.client.block_user(vpn_user.remnawave_user_id)
-        vpn_user.status = "blocked"
-        await self.session.commit()
+            raise NotFoundError("VPN user not found")
 
-    async def delete_user(self, user_id: UUID) -> None:
-        vpn_user = await self.vpn_users.get_by_user_id(user_id)
+        stats = await self.remnawave.get_user_stats(vpn_user.remnawave_uuid)
+        return stats
+
+    async def get_config_link(self, user_id: int) -> str:
+        vpn_user = await self.vpn_repo.get_by_user_id(user_id)
         if not vpn_user:
-            raise NotFoundException("VPN user not found")
-        await self.client.delete_user(vpn_user.remnawave_user_id)
-        await self.session.delete(vpn_user)
-        await self.session.commit()
+            raise NotFoundError("VPN user not found")
+        # Generate subscription link (e.g., vless://...)
+        # This depends on Remnawave panel configuration
+        return f"{settings.REMNAWAVE_API_URL}/sub/{vpn_user.remnawave_uuid}"

@@ -1,122 +1,116 @@
-from __future__ import annotations
-
-import uuid
-from datetime import UTC, datetime
-from decimal import Decimal
-
+from datetime import datetime, timezone
 from sqlalchemy import (
-    JSON,
-    Boolean,
-    DateTime,
-    Enum,
-    ForeignKey,
-    Integer,
-    Numeric,
-    String,
-    Text,
-    Uuid,
+    Column, Integer, String, Boolean, DateTime, Enum, ForeignKey, Numeric, Text
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
 from src.db.base import Base
-from src.domain.enums import PaymentProviderType, PaymentStatus, SubscriptionStatus, TariffPeriod, UserRole
+import enum
 
+class UserRole(str, enum.Enum):
+    ADMIN = "admin"
+    USER = "user"
 
-def utcnow() -> datetime:
-    return datetime.now(UTC)
+class SubscriptionStatus(str, enum.Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
 
+class PaymentStatus(str, enum.Enum):
+    PENDING = "pending"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    REFUNDED = "refunded"
 
-class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=utcnow,
-        onupdate=utcnow,
-    )
-
-
-class User(Base, TimestampMixin):
+class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    password_hash: Mapped[str] = mapped_column(String(255))
-    role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.USER)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_email_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
+    full_name = Column(String(255))
+    is_active = Column(Boolean, default=True)
+    is_verified = Column(Boolean, default=False)
+    role = Column(Enum(UserRole), default=UserRole.USER)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Relations
+    subscriptions = relationship("Subscription", back_populates="user")
+    payments = relationship("Payment", back_populates="user")
+    vpn_user = relationship("VpnUser", back_populates="user", uselist=False)
 
-    subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="user")
-    payments: Mapped[list["Payment"]] = relationship(back_populates="user")
-    vpn_user: Mapped["VpnUser | None"] = relationship(back_populates="user", uselist=False)
-
-
-class Tariff(Base, TimestampMixin):
-    __tablename__ = "tariffs"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    name: Mapped[str] = mapped_column(String(100), unique=True)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    period: Mapped[TariffPeriod] = mapped_column(Enum(TariffPeriod))
-    price: Mapped[Decimal] = mapped_column(Numeric(10, 2))
-    duration_days: Mapped[int] = mapped_column(Integer)
-    traffic_limit_bytes: Mapped[int] = mapped_column(Integer)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-
-    subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="tariff")
-
-
-class Subscription(Base, TimestampMixin):
-    __tablename__ = "subscriptions"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    tariff_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tariffs.id", ondelete="RESTRICT"))
-    status: Mapped[SubscriptionStatus] = mapped_column(Enum(SubscriptionStatus), default=SubscriptionStatus.PENDING)
-    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    auto_renew: Mapped[bool] = mapped_column(Boolean, default=True)
-
-    user: Mapped["User"] = relationship(back_populates="subscriptions")
-    tariff: Mapped["Tariff"] = relationship(back_populates="subscriptions")
-    payments: Mapped[list["Payment"]] = relationship(back_populates="subscription")
-
-
-class Payment(Base, TimestampMixin):
-    __tablename__ = "payments"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    subscription_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("subscriptions.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-    amount: Mapped[Decimal] = mapped_column(Numeric(10, 2))
-    currency: Mapped[str] = mapped_column(String(3), default="USD")
-    status: Mapped[PaymentStatus] = mapped_column(Enum(PaymentStatus), default=PaymentStatus.PENDING)
-    provider: Mapped[PaymentProviderType] = mapped_column(
-        Enum(PaymentProviderType),
-        default=PaymentProviderType.STRIPE,
-    )
-    provider_payment_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
-    provider_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    checkout_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    provider_payload: Mapped[dict] = mapped_column(JSON, default=dict)
-
-    user: Mapped["User"] = relationship(back_populates="payments")
-    subscription: Mapped["Subscription | None"] = relationship(back_populates="payments")
-
-
-class VpnUser(Base, TimestampMixin):
+class VpnUser(Base):
     __tablename__ = "vpn_users"
 
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True)
-    remnawave_user_id: Mapped[str] = mapped_column(String(255), unique=True)
-    username: Mapped[str] = mapped_column(String(255), unique=True)
-    status: Mapped[str] = mapped_column(String(50), default="active")
-    used_traffic_bytes: Mapped[int] = mapped_column(Integer, default=0)
-    traffic_limit_bytes: Mapped[int] = mapped_column(Integer)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    configs: Mapped[dict] = mapped_column(JSON, default=dict)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
+    remnawave_uuid = Column(String(36), unique=True, nullable=False)  # Remnawave user UUID
+    is_blocked = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
-    user: Mapped["User"] = relationship(back_populates="vpn_user")
+    user = relationship("User", back_populates="vpn_user")
+
+class Tariff(Base):
+    __tablename__ = "tariffs"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    description = Column(Text)
+    duration_days = Column(Integer, nullable=False)  # 30, 90, 365
+    price = Column(Numeric(10, 2), nullable=False)
+    traffic_limit_gb = Column(Integer, nullable=False)  # GB
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    subscriptions = relationship("Subscription", back_populates="tariff")
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    tariff_id = Column(Integer, ForeignKey("tariffs.id"), nullable=False)
+    status = Column(Enum(SubscriptionStatus), default=SubscriptionStatus.INACTIVE)
+    start_date = Column(DateTime(timezone=True))
+    end_date = Column(DateTime(timezone=True))
+    auto_renew = Column(Boolean, default=False)
+    stripe_subscription_id = Column(String(100), unique=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    user = relationship("User", back_populates="subscriptions")
+    tariff = relationship("Tariff", back_populates="subscriptions")
+    payments = relationship("Payment", back_populates="subscription")
+
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    subscription_id = Column(Integer, ForeignKey("subscriptions.id"))
+    amount = Column(Numeric(10, 2), nullable=False)
+    currency = Column(String(3), default="USD")
+    status = Column(Enum(PaymentStatus), default=PaymentStatus.PENDING)
+    stripe_payment_intent_id = Column(String(100), unique=True)
+    stripe_invoice_id = Column(String(100))
+    payment_method = Column(String(50))
+    paid_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user = relationship("User", back_populates="payments")
+    subscription = relationship("Subscription", back_populates="payments")
+
+class VerificationCode(Base):
+    __tablename__ = "verification_codes"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    code = Column(String(6), nullable=False)
+    purpose = Column(String(50), nullable=False)  # email_verify, password_reset
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

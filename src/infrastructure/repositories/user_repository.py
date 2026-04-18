@@ -1,31 +1,19 @@
-from __future__ import annotations
-
-from uuid import UUID
-
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from src.db.models import User
+from src.infrastructure.repositories.base import BaseRepository
 
-
-class UserRepository:
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
-
-    async def get_by_id(self, user_id: UUID) -> User | None:
-        return await self.session.get(User, user_id)
+class UserRepository(BaseRepository[User]):
+    def __init__(self, session: AsyncSession):
+        super().__init__(User, session)
 
     async def get_by_email(self, email: str) -> User | None:
-        result = await self.session.execute(select(User).where(User.email == email.lower()))
-        return result.scalar_one_or_none()
+        return await self.get_by(email=email)
 
-    async def create(self, **payload) -> User:
-        user = User(**payload)
-        self.session.add(user)
-        await self.session.flush()
-        return user
+    async def get_active_by_email(self, email: str) -> User | None:
+        return await self.get_by(email=email, is_active=True)
 
-    async def list_all(self) -> list[User]:
-        result = await self.session.execute(select(User).order_by(User.created_at.desc()))
-        return list(result.scalars().all())
+    async def update_password(self, user_id: int, hashed_password: str) -> None:
+        await self.update(user_id, hashed_password=hashed_password)
 
+    async def verify_email(self, user_id: int) -> None:
+        await self.update(user_id, is_verified=True)

@@ -1,62 +1,37 @@
-from __future__ import annotations
-
-from datetime import datetime
-from uuid import UUID
-
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from src.db.models import Subscription, Tariff
+from src.infrastructure.repositories.base import BaseRepository
+from typing import Optional, List
 
-from src.db.models import Subscription
-from src.domain.enums import SubscriptionStatus
+class SubscriptionRepository(BaseRepository[Subscription]):
+    def __init__(self, session: AsyncSession):
+        super().__init__(Subscription, session)
 
-
-class SubscriptionRepository:
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
-
-    async def get_by_id(self, subscription_id: UUID) -> Subscription | None:
+    async def get_active_for_user(self, user_id: int) -> Optional[Subscription]:
         result = await self.session.execute(
             select(Subscription)
-            .options(selectinload(Subscription.tariff))
+            .where(Subscription.user_id == user_id)
+            .where(Subscription.status == "active")
+            .order_by(Subscription.end_date.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_for_user(self, user_id: int) -> List[Subscription]:
+        return await self.list(user_id=user_id)
+
+    async def get_with_tariff(self, subscription_id: int) -> Optional[Subscription]:
+        result = await self.session.execute(
+            select(Subscription)
+            .join(Tariff)
             .where(Subscription.id == subscription_id)
         )
         return result.scalar_one_or_none()
 
-    async def get_active_for_user(self, user_id: UUID) -> Subscription | None:
-        result = await self.session.execute(
-            select(Subscription)
-            .options(selectinload(Subscription.tariff))
-            .where(
-                Subscription.user_id == user_id,
-                Subscription.status == SubscriptionStatus.ACTIVE,
-            )
-        )
-        return result.scalar_one_or_none()
+class TariffRepository(BaseRepository[Tariff]):
+    def __init__(self, session: AsyncSession):
+        super().__init__(Tariff, session)
 
-    async def get_pending_for_user(self, user_id: UUID) -> Subscription | None:
-        result = await self.session.execute(
-            select(Subscription)
-            .options(selectinload(Subscription.tariff))
-            .where(
-                Subscription.user_id == user_id,
-                Subscription.status == SubscriptionStatus.PENDING,
-            )
-        )
-        return result.scalar_one_or_none()
-
-    async def list_due_for_renewal(self, now: datetime) -> list[Subscription]:
-        result = await self.session.execute(
-            select(Subscription).where(
-                Subscription.auto_renew.is_(True),
-                Subscription.status == SubscriptionStatus.ACTIVE,
-                Subscription.ends_at <= now,
-            )
-        )
-        return list(result.scalars().all())
-
-    async def create(self, **payload) -> Subscription:
-        subscription = Subscription(**payload)
-        self.session.add(subscription)
-        await self.session.flush()
-        return subscription
+    async def get_active(self) -> List[Tariff]:
+        return await self.list(is_active=True)

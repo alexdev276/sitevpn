@@ -1,24 +1,17 @@
-from __future__ import annotations
-
-from uuid import UUID
-
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from src.db.models import VpnUser
+from src.infrastructure.repositories.base import BaseRepository
+from typing import Optional
 
+class VpnUserRepository(BaseRepository[VpnUser]):
+    def __init__(self, session: AsyncSession):
+        super().__init__(VpnUser, session)
 
-class VpnRepository:
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+    async def get_by_user_id(self, user_id: int) -> Optional[VpnUser]:
+        return await self.get_by(user_id=user_id)
 
-    async def get_by_user_id(self, user_id: UUID) -> VpnUser | None:
-        result = await self.session.execute(select(VpnUser).where(VpnUser.user_id == user_id))
-        return result.scalar_one_or_none()
+    async def get_by_remnawave_uuid(self, uuid: str) -> Optional[VpnUser]:
+        return await self.get_by(remnawave_uuid=uuid)
 
-    async def create(self, **payload) -> VpnUser:
-        vpn_user = VpnUser(**payload)
-        self.session.add(vpn_user)
-        await self.session.flush()
-        return vpn_user
-
+    async def create_for_user(self, user_id: int, remnawave_uuid: str) -> VpnUser:
+        return await self.create(user_id=user_id, remnawave_uuid=remnawave_uuid)

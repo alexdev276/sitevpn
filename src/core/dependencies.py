@@ -1,93 +1,64 @@
-from __future__ import annotations
-
-from uuid import UUID
-
-from fastapi import Cookie, Depends
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from redis.asyncio import Redis
+from typing import Optional, Annotated
+from fastapi import Depends, Request, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
+from redis.asyncio import Redis
 
-from src.application.auth_service import AuthService
-from src.application.payment_service import PaymentService
-from src.application.subscription_service import SubscriptionService
-from src.application.user_service import UserService
-from src.application.vpn_service import VpnService
-from src.core.config import Settings, get_settings
-from src.core.exceptions import ForbiddenException, UnauthorizedException
+from src.core.config import settings
 from src.core.security import decode_token
-from src.db.session import get_db_session
-from src.domain.enums import TokenType, UserRole
-from src.infrastructure.payments.stripe_provider import StripePaymentProvider
-from src.infrastructure.redis import redis_client
+from src.core.exceptions import AuthenticationError, PermissionDeniedError
+from src.db.session import get_db
 from src.infrastructure.repositories.user_repository import UserRepository
+from src.infrastructure.redis_client import get_redis
+from src.domain.user import User
 
+security = HTTPBearer(auto_error=False)
 
-bearer_scheme = HTTPBearer(auto_error=False)
-
-
-def get_redis() -> Redis:
-    return redis_client
-
-
-def get_auth_service(
-    session: AsyncSession = Depends(get_db_session),
+async def get_current_user_optional(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
-    settings: Settings = Depends(get_settings),
-) -> AuthService:
-    return AuthService(session, redis, settings)
+) -> Optional[User]:
+    if not credentials:
+        return None
+    token = credentials.credentials
+    try:
+        payload = decode_token(token)
+        if payload.get("type") != "access":
+            return None
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            return None
+    except JWTError:
+        return None
 
+    # Check if token is blacklisted
+    is_blacklisted = await redis.get(f"blacklist:{token}")
+    if is_blacklisted:
+        return None
 
-def get_payment_service(
-    session: AsyncSession = Depends(get_db_session),
-    settings: Settings = Depends(get_settings),
-) -> PaymentService:
-    return PaymentService(session, settings, StripePaymentProvider(settings))
-
-
-def get_subscription_service(
-    session: AsyncSession = Depends(get_db_session),
-) -> SubscriptionService:
-    return SubscriptionService(session)
-
-
-def get_vpn_service(
-    session: AsyncSession = Depends(get_db_session),
-    settings: Settings = Depends(get_settings),
-) -> VpnService:
-    return VpnService(session, settings)
-
-
-def get_user_service(
-    session: AsyncSession = Depends(get_db_session),
-) -> UserService:
-    return UserService(session)
-
+    user_repo = UserRepository(db)
+    user = await user_repo.get_by_id(int(user_id))
+    if user is None or not user.is_active:
+        return None
+    return user
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-    session: AsyncSession = Depends(get_db_session),
-    settings: Settings = Depends(get_settings),
-):
-    if not credentials:
-        raise UnauthorizedException("Missing access token")
-    payload = decode_token(credentials.credentials, settings.jwt_secret_key)
-    if payload["type"] != TokenType.ACCESS.value:
-        raise UnauthorizedException("Invalid token type")
-    user = await UserRepository(session).get_by_id(UUID(payload["sub"]))
-    if not user:
-        raise UnauthorizedException("User not found")
-    return user
+    current_user: Optional[User] = Depends(get_current_user_optional),
+) -> User:
+    if current_user is None:
+        raise AuthenticationError("Not authenticated")
+    return current_user
 
+async def get_current_admin(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    if current_user.role != "admin":
+        raise PermissionDeniedError("Admin privileges required")
+    return current_user
 
-async def get_current_admin(user=Depends(get_current_user)):
-    if user.role != UserRole.ADMIN:
-        raise ForbiddenException("Admin access required")
-    return user
-
-
-async def get_refresh_cookie(
-    settings: Settings = Depends(get_settings),
-    refresh_token: str | None = Cookie(default=None, alias="refresh_token"),
-) -> str | None:
-    return refresh_token
-
+def get_brute_force_checker():
+    from src.infrastructure.brute_force import BruteForceProtector
+    return BruteForceProtector()

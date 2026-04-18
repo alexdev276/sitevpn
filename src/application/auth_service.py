@@ -1,168 +1,182 @@
-from __future__ import annotations
-
-from uuid import UUID
-
-import structlog
-from redis.asyncio import Redis
+import secrets
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
+import structlog
 
-from src.core.config import Settings
-from src.core.exceptions import AppException, ConflictException, UnauthorizedException
 from src.core.security import (
-    create_access_token,
-    create_refresh_token,
-    decode_token,
-    generate_code,
-    hash_password,
-    utcnow,
-    verify_password,
+    verify_password, get_password_hash, create_access_token, create_refresh_token, decode_token
 )
-from src.domain.enums import TokenType, UserRole
+from src.core.config import settings
+from src.core.exceptions import AuthenticationError, ValidationError, NotFoundError
+from src.domain.user import UserCreate, User, TokenResponse
 from src.infrastructure.repositories.user_repository import UserRepository
+from src.infrastructure.repositories.base import BaseRepository
+from src.db.models import VerificationCode, User as UserModel
+from src.infrastructure.email_sender import EmailSender
+from src.infrastructure.redis_client import get_redis
+from src.infrastructure.brute_force import BruteForceProtector
 
-
-logger = structlog.get_logger(__name__)
-
+logger = structlog.get_logger()
 
 class AuthService:
-    def __init__(self, session: AsyncSession, redis: Redis, settings: Settings) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        email_sender: EmailSender,
+        brute_force: BruteForceProtector,
+    ):
         self.session = session
-        self.redis = redis
-        self.settings = settings
-        self.users = UserRepository(session)
+        self.user_repo = UserRepository(session)
+        self.code_repo = BaseRepository(VerificationCode, session)
+        self.email_sender = email_sender
+        self.brute_force = brute_force
 
-    async def register(self, email: str, password: str) -> None:
-        email = email.lower()
-        existing = await self.users.get_by_email(email)
+    async def register(self, user_data: UserCreate) -> User:
+        # Check if user exists
+        existing = await self.user_repo.get_by_email(user_data.email)
         if existing:
-            raise ConflictException("User with this email already exists")
+            raise ValidationError("User with this email already exists")
 
-        await self.users.create(
-            email=email,
-            password_hash=hash_password(password),
-            role=UserRole.USER,
+        # Create user
+        hashed = get_password_hash(user_data.password)
+        user = await self.user_repo.create(
+            email=user_data.email,
+            hashed_password=hashed,
+            full_name=user_data.full_name,
+            is_verified=False,
         )
-        code = generate_code()
-        await self.redis.setex(f"verify:{email}", 900, code)
-        self._enqueue_email_code(email, code, "email_verification")
         await self.session.commit()
-        logger.info("user_registered", email=email, verification_code=code)
+        await self.session.refresh(user)
 
-    async def confirm_email(self, email: str, code: str) -> None:
-        email = email.lower()
-        cached_code = await self.redis.get(f"verify:{email}")
-        if cached_code != code.upper():
-            raise AppException("Invalid verification code", 400, "invalid_code")
-        user = await self.users.get_by_email(email)
-        if not user:
-            raise UnauthorizedException("User not found")
-        user.is_email_confirmed = True
-        await self.redis.delete(f"verify:{email}")
-        await self.session.commit()
+        # Send verification email
+        await self._send_verification_email(user)
 
-    async def login(self, email: str, password: str) -> dict[str, str]:
-        email = email.lower()
-        await self._ensure_not_blocked(f"login:{email}")
-        user = await self.users.get_by_email(email)
-        if not user or not verify_password(password, user.password_hash):
-            await self._register_failed_attempt(f"login:{email}")
-            raise UnauthorizedException("Invalid credentials")
-        if not user.is_email_confirmed:
-            raise UnauthorizedException("Email is not confirmed")
-        access_token = create_access_token(self.settings, str(user.id), user.role.value)
-        refresh_token, refresh_jti = create_refresh_token(self.settings, str(user.id))
-        await self.redis.setex(
-            f"refresh:{refresh_jti}",
-            self.settings.jwt_refresh_ttl_days * 86400,
-            str(user.id),
-        )
-        await self.redis.delete(f"attempts:login:{email}")
-        return {"access_token": access_token, "refresh_token": refresh_token}
+        logger.info("User registered", user_id=user.id, email=user.email)
+        return User.model_validate(user)
 
-    async def refresh_tokens(self, refresh_token: str) -> dict[str, str]:
-        payload = decode_token(refresh_token, self.settings.jwt_refresh_secret_key)
-        if payload["type"] != TokenType.REFRESH.value:
-            raise UnauthorizedException("Invalid refresh token type")
-        jti = payload["jti"]
-        user_id = payload["sub"]
-        exists = await self.redis.get(f"refresh:{jti}")
-        if not exists:
-            raise UnauthorizedException("Refresh token expired or revoked")
-        user = await self.users.get_by_id(UUID(user_id))
-        if not user:
-            raise UnauthorizedException("User not found")
-        await self.redis.delete(f"refresh:{jti}")
-        access_token = create_access_token(self.settings, str(user.id), user.role.value)
-        new_refresh_token, new_jti = create_refresh_token(self.settings, str(user.id))
-        await self.redis.setex(
-            f"refresh:{new_jti}",
-            self.settings.jwt_refresh_ttl_days * 86400,
-            str(user.id),
-        )
-        return {"access_token": access_token, "refresh_token": new_refresh_token}
+    async def login(self, email: str, password: str, ip_address: str) -> Tuple[TokenResponse, str]:
+        # Check brute force
+        if await self.brute_force.is_blocked(f"email:{email}"):
+            raise AuthenticationError("Too many failed attempts. Try again later.")
+        if await self.brute_force.is_blocked(f"ip:{ip_address}"):
+            raise AuthenticationError("Too many failed attempts from this IP.")
 
-    async def logout(self, refresh_token: str | None) -> None:
-        if not refresh_token:
-            return
-        payload = decode_token(refresh_token, self.settings.jwt_refresh_secret_key)
-        await self.redis.delete(f"refresh:{payload['jti']}")
+        user = await self.user_repo.get_active_by_email(email)
+        if not user or not verify_password(password, user.hashed_password):
+            await self.brute_force.record_failure(f"email:{email}")
+            await self.brute_force.record_failure(f"ip:{ip_address}")
+            raise AuthenticationError("Invalid email or password")
 
-    async def request_password_reset(self, email: str) -> None:
-        email = email.lower()
-        await self._ensure_not_blocked(f"reset:{email}")
-        user = await self.users.get_by_email(email)
-        if not user:
-            await self._register_failed_attempt(f"reset:{email}")
-            return
-        code = generate_code()
-        await self.redis.setex(f"reset:{email}", 900, code)
-        self._enqueue_email_code(email, code, "password_reset")
-        logger.info("password_reset_requested", email=email, reset_code=code)
+        if not user.is_verified:
+            raise AuthenticationError("Email not verified")
 
-    async def reset_password(self, email: str, code: str, new_password: str) -> None:
-        email = email.lower()
-        cached_code = await self.redis.get(f"reset:{email}")
-        if cached_code != code.upper():
-            raise AppException("Invalid reset code", 400, "invalid_code")
-        user = await self.users.get_by_email(email)
-        if not user:
-            raise UnauthorizedException("User not found")
-        user.password_hash = hash_password(new_password)
-        await self.redis.delete(f"reset:{email}")
-        await self.session.commit()
+        # Reset brute force
+        await self.brute_force.reset(f"email:{email}")
+        await self.brute_force.reset(f"ip:{ip_address}")
 
-    async def change_password(self, user_id: UUID, current_password: str, new_password: str) -> None:
-        user = await self.users.get_by_id(user_id)
-        if not user or not verify_password(current_password, user.password_hash):
-            raise UnauthorizedException("Current password is invalid")
-        user.password_hash = hash_password(new_password)
-        await self.session.commit()
+        # Create tokens
+        access_token = create_access_token({"sub": str(user.id)})
+        refresh_token = create_refresh_token({"sub": str(user.id)})
 
-    async def _ensure_not_blocked(self, key: str) -> None:
-        blocked_until = await self.redis.get(f"blocked:{key}")
-        if blocked_until:
-            raise AppException(
-                "Too many failed attempts. Try again later.",
-                429,
-                "too_many_attempts",
-            )
+        logger.info("User logged in", user_id=user.id, email=user.email)
+        return TokenResponse(access_token=access_token), refresh_token
 
-    async def _register_failed_attempt(self, key: str) -> None:
-        attempts_key = f"attempts:{key}"
-        attempts = await self.redis.incr(attempts_key)
-        if attempts == 1:
-            await self.redis.expire(attempts_key, self.settings.brute_force_block_minutes * 60)
-        if attempts >= self.settings.brute_force_max_attempts:
-            await self.redis.setex(
-                f"blocked:{key}",
-                self.settings.brute_force_block_minutes * 60,
-                utcnow().isoformat(),
-            )
-
-    def _enqueue_email_code(self, email: str, code: str, purpose: str) -> None:
+    async def refresh_tokens(self, refresh_token: str) -> Tuple[TokenResponse, str]:
         try:
-            from src.tasks.jobs import send_email_code
+            payload = decode_token(refresh_token)
+            if payload.get("type") != "refresh":
+                raise AuthenticationError("Invalid token type")
+            user_id = int(payload.get("sub"))
+        except Exception:
+            raise AuthenticationError("Invalid refresh token")
 
-            send_email_code.delay(email, code, purpose)
-        except Exception as exc:  # pragma: no cover
-            logger.warning("email_task_enqueue_failed", email=email, purpose=purpose, error=str(exc))
+        user = await self.user_repo.get(user_id)
+        if not user or not user.is_active:
+            raise AuthenticationError("User not found or inactive")
+
+        # Check if token is blacklisted (optional)
+        # ...
+
+        new_access = create_access_token({"sub": str(user.id)})
+        new_refresh = create_refresh_token({"sub": str(user.id)})
+
+        return TokenResponse(access_token=new_access), new_refresh
+
+    async def logout(self, access_token: str, refresh_token: Optional[str] = None):
+        # Blacklist tokens
+        redis = await anext(get_redis())
+        # For simplicity, just blacklist access token with expiry
+        # In production, use proper token blacklist
+        await redis.setex(f"blacklist:{access_token}", settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60, "1")
+        if refresh_token:
+            await redis.setex(f"blacklist:{refresh_token}", settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400, "1")
+        logger.info("User logged out")
+
+    async def verify_email(self, code: str) -> bool:
+        verification = await self.code_repo.get_by(code=code, purpose="email_verify", used=False)
+        if not verification or verification.expires_at < datetime.now(timezone.utc):
+            raise ValidationError("Invalid or expired verification code")
+
+        user = await self.user_repo.get(verification.user_id)
+        if not user:
+            raise NotFoundError("User not found")
+
+        user.is_verified = True
+        verification.used = True
+        await self.session.commit()
+        logger.info("Email verified", user_id=user.id)
+        return True
+
+    async def request_password_reset(self, email: str):
+        user = await self.user_repo.get_by_email(email)
+        if not user:
+            # Don't reveal existence
+            return
+        await self._send_password_reset_email(user)
+
+    async def reset_password(self, code: str, new_password: str):
+        verification = await self.code_repo.get_by(code=code, purpose="password_reset", used=False)
+        if not verification or verification.expires_at < datetime.now(timezone.utc):
+            raise ValidationError("Invalid or expired reset code")
+
+        user = await self.user_repo.get(verification.user_id)
+        if not user:
+            raise NotFoundError("User not found")
+
+        hashed = get_password_hash(new_password)
+        user.hashed_password = hashed
+        verification.used = True
+        await self.session.commit()
+        logger.info("Password reset", user_id=user.id)
+
+    async def _send_verification_email(self, user: UserModel):
+        code = secrets.token_urlsafe(32)[:6]
+        expires = datetime.now(timezone.utc) + timedelta(hours=24)
+        await self.code_repo.create(
+            user_id=user.id,
+            code=code,
+            purpose="email_verify",
+            expires_at=expires,
+        )
+        await self.session.commit()
+
+        # Send email
+        subject = "Verify your email"
+        html = f"Your verification code: {code}"
+        await self.email_sender.send_email(user.email, subject, html)
+
+    async def _send_password_reset_email(self, user: UserModel):
+        code = secrets.token_urlsafe(32)[:6]
+        expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        await self.code_repo.create(
+            user_id=user.id,
+            code=code,
+            purpose="password_reset",
+            expires_at=expires,
+        )
+        await self.session.commit()
+
+        subject = "Password Reset"
+        html = f"Your password reset code: {code}"
+        await self.email_sender.send_email(user.email, subject, html)

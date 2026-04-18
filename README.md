@@ -1,101 +1,41 @@
-# VPN Service
+# VPN Service with Remnawave Integration
 
-Коммерческий VPN-сервис на FastAPI с clean architecture, PostgreSQL, Redis, Celery и интеграцией Remnawave API.
+## Quick Start
 
-## Stack
+1. Clone repository and copy `.env.example` to `.env`, fill in your values.
+2. Run `docker-compose up -d`
+3. Access API docs at http://localhost:8000/docs
 
-- Python 3.11+
-- FastAPI
-- PostgreSQL + SQLAlchemy 2.0 Async ORM
-- Redis
-- Celery + Redis
-- Stripe как платёжный провайдер
-- JWT access/refresh токены
-- structlog
-- Pydantic Settings
+## Environment Variables
 
-## Структура
+See `.env.example` for all required variables. Important:
+- `REMNAWAVE_API_URL` and `REMNAWAVE_API_KEY` from your Remnawave panel.
+- `STRIPE_API_KEY` and `STRIPE_WEBHOOK_SECRET` from Stripe dashboard.
+- `SMTP_*` for email sending.
 
-```text
-src/
-  api/
-  application/
-  core/
-  db/
-  domain/
-  infrastructure/
-  tasks/
-tests/
-```
+## Running Migrations
 
-## Основные возможности
+Alembic is configured. Run inside app container:
+docker-compose exec app alembic upgrade head
 
-- Регистрация, подтверждение email кодом, login/logout, refresh-токены в httpOnly cookie
-- Восстановление и смена пароля
-- Роли `admin` и `user`
-- Платежи и подписки с webhooks Stripe
-- Создание и продление VPN-пользователя в Remnawave
-- Личный кабинет: подписка, VPN-конфиги, история платежей
-- Админ-эндпоинты: пользователи, тарифы, платежи, системные логи
-- Rate limiting и защита от brute force через Redis
-- JSON-логирование через structlog
+## Testing
 
-## Запуск локально
+Run tests:
 
-1. Скопируйте `.env.example` в `.env` и заполните секреты.
-2. Поднимите сервисы:
+docker-compose exec app pytest
 
-```bash
-docker compose up --build
-```
+## Architecture
 
-3. Примените миграции:
+- Clean Architecture with separation of domain, application, infrastructure, and API layers.
+- Async SQLAlchemy, Redis for caching/rate limiting.
+- Celery for background tasks (email, subscription renewal).
+- JWT authentication with refresh tokens in httpOnly cookies.
+- Stripe payment integration (easily replaceable).
 
-```bash
-alembic upgrade head
-```
+## API Endpoints
 
-4. Swagger будет доступен на `http://localhost:8000/docs`.
+See Swagger at `/docs` for full list.
 
-## Переменные окружения
+## Admin
 
-Основные переменные описаны в `.env.example`.
-
-- `DATABASE_URL`: async DSN для PostgreSQL
-- `REDIS_URL`: Redis для кэша, rate limit и Celery
-- `JWT_SECRET_KEY`, `JWT_REFRESH_SECRET_KEY`: секреты JWT
-- `STRIPE_*`: параметры Stripe
-- `REMNAWAVE_*`: базовый URL, API key и Internal Squad ID
-- `APP_LOG_FILE`: путь до лог-файла для admin endpoint `/api/v1/admin/logs`
-
-## Remnawave
-
-Интеграция изолирована в `src/infrastructure/clients/remnawave_client.py`.
-Сервисный слой использует четыре основные операции:
-
-- `create_user`
-- `block_user`
-- `extend_user`
-- `delete_user`
-
-Если SDK меняет имя клиентского класса, адаптер можно скорректировать локально без переписывания use case-логики.
-
-## Тесты
-
-```bash
-pytest
-```
-
-Подробный сценарий использования API и прогонки тестов вынесен в [USAGE_AND_TESTS.md](/Users/alexej/Documents/VPN-USER/USAGE_AND_TESTS.md).
-
-В проекте есть:
-
-- unit-тест создания подписки
-- unit-тест обработки webhook
-- integration-тест регистрации пользователя и создания платежа через моки
-
-## Примечания
-
-- Все даты сохраняются как timezone-aware UTC datetimes.
-- Refresh token хранится в httpOnly cookie.
-- Для production стоит вынести отправку email в реальный SMTP/mail provider и усилить проверку Stripe signature в формате, который ожидает Stripe.
+Default admin credentials can be set via `.env`. After first run, change password.
