@@ -6,8 +6,10 @@ from decimal import Decimal
 
 from src.domain.payment import PaymentCreate
 from src.domain.user import User
+from src.domain.subscription import SubscriptionCreate   # <-- добавлен импорт
 from src.infrastructure.repositories.payment_repository import PaymentRepository
-from src.infrastructure.repositories.tariff_repository import TariffRepository
+# Исправлен импорт: TariffRepository лежит в subscription_repository
+from src.infrastructure.repositories.subscription_repository import TariffRepository
 from src.infrastructure.repositories.subscription_repository import SubscriptionRepository
 from src.infrastructure.payment_provider import get_payment_provider, PaymentProvider
 from src.application.subscription_service import SubscriptionService
